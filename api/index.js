@@ -422,6 +422,16 @@ const handler = async (req, res) => {
     req.url = originalUrl;
   }
 
+  // Direct Vercel health endpoint
+  if (req.method === "GET" && req.url.endsWith("/health")) {
+    return json(res, 200, {
+      success: true,
+      service: "Vicky Network backend",
+      status: "running",
+      platform: "vercel"
+    });
+  }
+
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
