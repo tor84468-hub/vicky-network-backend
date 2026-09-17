@@ -217,7 +217,6 @@ async function getCallSignals(req, res, callIdValue, subscriberId) {
 }
 
 
-const activeCalls = new Map();
 
 function callId() {
   return require("crypto").randomUUID();
@@ -259,7 +258,6 @@ async function cleanupStaleCalls() {
       duration_seconds: 0
     });
 
-    activeCalls.delete(call.id);
   }
   } catch (err) {
     console.log("Call cleanup error:", err.message);
@@ -349,7 +347,6 @@ async function startCall(req, res) {
 
     await db.createCallLog(call);
 
-    activeCalls.set(call.id, call);
 
     return json(res, 201, {
       success: true,
@@ -436,12 +433,6 @@ if (!call) {
       duration_seconds: 0
     });
 
-    activeCalls.set(call.id, {
-      ...call,
-      status: "connected",
-      answered_at
-    });
-
     return json(res, 200, {
       success: true,
       call: cleanCall(updated)
@@ -490,7 +481,6 @@ async function declineCall(req, res) {
       duration_seconds: 0
     });
 
-    activeCalls.delete(call.id);
 
     return json(res, 200, {
       success: true,
@@ -554,7 +544,6 @@ async function endCall(req, res) {
       duration_seconds: duration
     });
 
-    activeCalls.delete(call.id);
 
     return json(res, 200, {
       success: true,
