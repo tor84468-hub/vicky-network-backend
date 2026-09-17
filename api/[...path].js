@@ -391,12 +391,25 @@ async function answerCall(req, res) {
     const callIdValue = String(data.call_id || "");
     const subscriber_id = String(data.subscriber_id || "");
 
+    console.log("ANSWER DEBUG:", {
+      callIdValue,
+      subscriber_id
+    });
+
     const call = await db.getActiveCall(callIdValue);
+
+    console.log("ANSWER CALL LOOKUP:", call ? {
+      id: call.id,
+      status: call.status,
+      caller_id: call.caller_id,
+      receiver_id: call.receiver_id
+    } : null);
 
     if (!call) {
       return json(res, 404, {
         success: false,
-        error: "Call not found"
+        error: "Call not found",
+        debug_call_id: callIdValue
       });
     }
 
