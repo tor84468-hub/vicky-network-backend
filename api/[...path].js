@@ -314,6 +314,21 @@ async function startCall(req, res) {
     const callerBusy = await db.getActiveCallForSubscriber(caller.id);
     const receiverBusy = await db.getActiveCallForSubscriber(receiver.id);
 
+    console.log("CALL BUSY CHECK:", {
+      caller_id: caller.id,
+      caller_number: caller.vicky_number,
+      callerBusy: callerBusy ? {
+        id: callerBusy.id,
+        status: callerBusy.status
+      } : null,
+      receiver_id: receiver.id,
+      receiver_number: receiver.vicky_number,
+      receiverBusy: receiverBusy ? {
+        id: receiverBusy.id,
+        status: receiverBusy.status
+      } : null
+    });
+
     if (callerBusy || receiverBusy) {
       return json(res, 409, {
         success: false,
