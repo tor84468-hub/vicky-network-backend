@@ -405,27 +405,11 @@ async function answerCall(req, res) {
     const data = await body(req);
     const callIdValue = String(data.call_id || "");
     const subscriber_id = String(data.subscriber_id || "");
-
-    console.log("ANSWER DEBUG:", {
-      callIdValue,
-      subscriber_id
-    });
-
-    const call = await db.getActiveCall(callIdValue);
-
-    console.log("ANSWER CALL LOOKUP:", call ? {
-      id: call.id,
-      status: call.status,
-      caller_id: call.caller_id,
-      receiver_id: call.receiver_id
-    } : null);
-
-    if (!call) {
+const call = await db.getActiveCall(callIdValue);
+if (!call) {
       return json(res, 404, {
         success: false,
-        error: "Call not found",
-        debug_call_id: callIdValue,
-        debug_subscriber_id: subscriber_id
+        error: "Call not found"
       });
     }
 
@@ -642,15 +626,7 @@ if (
     subscriberId
   );
 }
-
-if (
-    req.method === "GET" &&
-    req.url.startsWith("/debug/active-calls")
-  ) {
-    return debugActiveCalls(req, res);
-  }
-
-  if (req.method === "POST" && req.url === "/call/start") {
+if (req.method === "POST" && req.url === "/call/start") {
     return startCall(req, res);
   }
 
