@@ -56,18 +56,45 @@ function publicSubscriber(s) {
 
 /* VICKY_WEBRTC_SIGNALING */
 
-function sendCallSignal(req, res) {
-  body(req).then(data => {
-    const call = activeCalls.get(data.call_id);
 
-    if (!call) {
-      return json(res, 404, { success: false, error: "Call not found" });
-    }
+let signalingTableReady = null;
 
-    if (!data.subscriber_id || !data.type || data.data === undefined) {
+async function ensureSignalingTable() {
+  if (!signalingTableReady) {
+    signalingTableReady = db.sql`
+      CREATE TABLE IF NOT EXISTS call_signals (
+        id TEXT PRIMARY KEY,
+        call_id TEXT NOT NULL,
+        sender_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+  }
+
+  await signalingTableReady;
+}
+
+async function sendCallSignal(req, res) {
+  try {
+    const data = await body(req);
+
+    if (!data.call_id || !data.subscriber_id || !data.type || data.data === undefined) {
       return json(res, 400, {
         success: false,
         error: "call_id, subscriber_id, type and data are required"
+      });
+    }
+
+    await ensureSignalingTable();
+
+    const call = await db.getCallLog(data.call_id);
+
+    if (!call) {
+      return json(res, 404, {
+        success: false,
+        error: "Call not found"
       });
     }
 
@@ -81,60 +108,113 @@ function sendCallSignal(req, res) {
       });
     }
 
-    if (!call.signals) call.signals = [];
+    const signalId = require("crypto").randomUUID();
 
-    call.signals.push({
-      id: require("crypto").randomUUID(),
-      from: data.subscriber_id,
-      type: data.type,
-      data: data.data,
-      created_at: new Date().toISOString()
-    });
+    await db.sql`
+      INSERT INTO call_signals (
+        id,
+        call_id,
+        sender_id,
+        type,
+        data,
+        created_at
+      )
+      VALUES (
+        ${signalId},
+        ${data.call_id},
+        ${data.subscriber_id},
+        ${data.type},
+        ${JSON.stringify(data.data)}::jsonb,
+        NOW()
+      )
+    `;
 
     return json(res, 200, {
-      success: true
+      success: true,
+      signal_id: signalId
     });
-  });
-}
 
-function getCallSignals(req, res, callIdValue, subscriberId) {
-  const call = activeCalls.get(callIdValue);
+  } catch (err) {
+    console.log("Send call signal error:", err.message);
 
-  if (!call) {
-    return json(res, 404, {
+    return json(res, 500, {
       success: false,
-      error: "Call not found"
+      error: "Failed to send call signal"
     });
   }
-
-  if (
-    subscriberId !== call.caller_id &&
-    subscriberId !== call.receiver_id
-  ) {
-    return json(res, 403, {
-      success: false,
-      error: "Not a participant in this call"
-    });
-  }
-
-  const signals = (call.signals || [])
-    .filter(x => x.from !== subscriberId)
-    .map(x => ({
-      id: x.id,
-      type: x.type,
-      data: x.data,
-      created_at: x.created_at
-    }));
-
-  call.signals = (call.signals || [])
-    .filter(x => x.from === subscriberId);
-
-  return json(res, 200, {
-    success: true,
-    signals
-  });
 }
 
+async function getCallSignals(req, res, callIdValue, subscriberId) {
+  try {
+    if (!subscriberId) {
+      return json(res, 400, {
+        success: false,
+        error: "subscriber_id is required"
+      });
+    }
+
+    await ensureSignalingTable();
+
+    const call = await db.getCallLog(callIdValue);
+
+    if (!call) {
+      return json(res, 404, {
+        success: false,
+        error: "Call not found"
+      });
+    }
+
+    if (
+      subscriberId !== call.caller_id &&
+      subscriberId !== call.receiver_id
+    ) {
+      return json(res, 403, {
+        success: false,
+        error: "Not a participant in this call"
+      });
+    }
+
+    const signals = await db.sql`
+      SELECT
+        id,
+        type,
+        data,
+        created_at
+      FROM call_signals
+      WHERE call_id = ${callIdValue}
+        AND sender_id <> ${subscriberId}
+      ORDER BY created_at ASC
+      LIMIT 100
+    `;
+
+    if (signals.length > 0) {
+      const ids = signals.map(x => x.id);
+
+      await db.sql`
+        DELETE FROM call_signals
+        WHERE id = ANY(${ids})
+      `;
+    }
+
+    return json(res, 200, {
+      success: true,
+      signals: signals.map(x => ({
+        id: x.id,
+        type: x.type,
+        data: x.data,
+        created_at: x.created_at
+      }))
+    });
+
+  } catch (err) {
+    console.log("Get call signals error:", err.message);
+
+    return json(res, 500, {
+      success: false,
+      error: "Failed to get call signals"
+    });
+  }
+}
 
 
 const activeCalls = new Map();
