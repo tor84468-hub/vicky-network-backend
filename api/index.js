@@ -1,0 +1,637 @@
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const PORT = process.env.PORT || 8789;
+const DATA_DIR = path.join(__dirname, "data");
+const DB_FILE = path.join(DATA_DIR, "subscribers.json");
+
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, "[]");
+
+function readSubscribers() {
+  return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+}
+
+function saveSubscribers(data) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+}
+
+function json(res, status, data) {
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+  });
+  res.end(JSON.stringify(data));
+}
+
+function body(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", chunk => data += chunk);
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        reject(new Error("Invalid JSON"));
+      }
+    });
+  });
+}
+
+function makeVickyNumber(subscribers) {
+  let number;
+
+  do {
+    const part = Math.floor(10000000 + Math.random() * 90000000);
+    number = String(part);
+  } while (subscribers.some(s => s.vicky_number === number));
+
+  return number;
+}
+
+function publicSubscriber(s) {
+  return {
+    id: s.id,
+    name: s.name,
+    email: s.email,
+    vicky_number: s.vicky_number,
+    status: s.status,
+    data_balance_gb: s.data_balance_gb,
+    call_balance_minutes: s.call_balance_minutes,
+    active_data_subscription: s.active_data_subscription,
+    active_call_subscription: s.active_call_subscription,
+    created_at: s.created_at
+  };
+}
+
+
+/* VICKY_CALL_SIGNALING */
+
+/* VICKY_WEBRTC_SIGNALING */
+
+function sendCallSignal(req, res) {
+  body(req).then(data => {
+    const call = activeCalls.get(data.call_id);
+
+    if (!call) {
+      return json(res, 404, { success: false, error: "Call not found" });
+    }
+
+    if (!data.subscriber_id || !data.type || data.data === undefined) {
+      return json(res, 400, {
+        success: false,
+        error: "call_id, subscriber_id, type and data are required"
+      });
+    }
+
+    if (
+      data.subscriber_id !== call.caller_id &&
+      data.subscriber_id !== call.receiver_id
+    ) {
+      return json(res, 403, {
+        success: false,
+        error: "Not a participant in this call"
+      });
+    }
+
+    if (!call.signals) call.signals = [];
+
+    call.signals.push({
+      id: require("crypto").randomUUID(),
+      from: data.subscriber_id,
+      type: data.type,
+      data: data.data,
+      created_at: new Date().toISOString()
+    });
+
+    return json(res, 200, {
+      success: true
+    });
+  });
+}
+
+function getCallSignals(req, res, callIdValue, subscriberId) {
+  const call = activeCalls.get(callIdValue);
+
+  if (!call) {
+    return json(res, 404, {
+      success: false,
+      error: "Call not found"
+    });
+  }
+
+  if (
+    subscriberId !== call.caller_id &&
+    subscriberId !== call.receiver_id
+  ) {
+    return json(res, 403, {
+      success: false,
+      error: "Not a participant in this call"
+    });
+  }
+
+  const signals = (call.signals || [])
+    .filter(x => x.from !== subscriberId)
+    .map(x => ({
+      id: x.id,
+      type: x.type,
+      data: x.data,
+      created_at: x.created_at
+    }));
+
+  call.signals = (call.signals || [])
+    .filter(x => x.from === subscriberId);
+
+  return json(res, 200, {
+    success: true,
+    signals
+  });
+}
+
+
+
+const activeCalls = new Map();
+
+function callId() {
+  return require("crypto").randomUUID();
+}
+
+function cleanCall(call) {
+  return {
+    id: call.id,
+    caller_id: call.caller_id,
+    caller_number: call.caller_number,
+    receiver_id: call.receiver_id,
+    receiver_number: call.receiver_number,
+    status: call.status,
+    created_at: call.created_at,
+    answered_at: call.answered_at || null,
+    ended_at: call.ended_at || null
+  };
+}
+
+/*
+  POST /call/start
+
+  Creates a Vicky-to-Vicky call request.
+*/
+async function startCall(req, res) {
+  try {
+    const data = await body(req);
+
+    const caller_id = String(data.caller_id || "");
+    const receiver_number = String(data.receiver_number || "");
+
+    if (!caller_id || !receiver_number) {
+      return json(res, 400, {
+        success: false,
+        error: "caller_id and receiver_number are required"
+      });
+    }
+
+    const subscribers = readSubscribers();
+
+    const caller = subscribers.find(
+      s => s.id === caller_id
+    );
+
+    const receiver = subscribers.find(
+      s => String(s.vicky_number) === receiver_number
+    );
+
+    if (!caller) {
+      return json(res, 404, {
+        success: false,
+        error: "Caller account not found"
+      });
+    }
+
+    if (!receiver) {
+      return json(res, 404, {
+        success: false,
+        error: "Vicky number not found"
+      });
+    }
+
+    if (caller.id === receiver.id) {
+      return json(res, 400, {
+        success: false,
+        error: "You cannot call yourself"
+      });
+    }
+
+    const existing = [...activeCalls.values()].find(
+      c =>
+        (c.caller_id === caller.id ||
+          c.receiver_id === caller.id ||
+          c.caller_id === receiver.id ||
+          c.receiver_id === receiver.id) &&
+        ["ringing", "connected"].includes(c.status)
+    );
+
+    if (existing) {
+      return json(res, 409, {
+        success: false,
+        error: "One of the users is already on a call"
+      });
+    }
+
+    const call = {
+      id: callId(),
+      caller_id: caller.id,
+      caller_number: String(caller.vicky_number),
+      receiver_id: receiver.id,
+      receiver_number: String(receiver.vicky_number),
+      status: "ringing",
+      signals: [],
+      created_at: new Date().toISOString()
+    };
+
+    activeCalls.set(call.id, call);
+
+    return json(res, 201, {
+      success: true,
+      call: cleanCall(call)
+    });
+  } catch (err) {
+    return json(res, 500, {
+      success: false,
+      error: err.message
+    });
+  }
+}
+
+/*
+  GET /call/incoming/:subscriber_id
+
+  Returns the current ringing call for a subscriber.
+*/
+function incomingCall(req, res, subscriber_id) {
+  const call = [...activeCalls.values()].find(
+    c =>
+      c.receiver_id === subscriber_id &&
+      c.status === "ringing"
+  );
+
+  return json(res, 200, {
+    success: true,
+    call: call ? cleanCall(call) : null
+  });
+}
+
+/*
+  POST /call/answer
+
+  Accept an incoming call.
+*/
+async function answerCall(req, res) {
+  try {
+    const data = await body(req);
+    const call = activeCalls.get(String(data.call_id || ""));
+
+    if (!call) {
+      return json(res, 404, {
+        success: false,
+        error: "Call not found"
+      });
+    }
+
+    if (call.status !== "ringing") {
+      return json(res, 409, {
+        success: false,
+        error: "Call is no longer ringing"
+      });
+    }
+
+    if (String(data.subscriber_id || "") !== call.receiver_id) {
+      return json(res, 403, {
+        success: false,
+        error: "Not authorized to answer this call"
+      });
+    }
+
+    call.status = "connected";
+    call.answered_at = new Date().toISOString();
+
+    return json(res, 200, {
+      success: true,
+      call: cleanCall(call)
+    });
+  } catch (err) {
+    return json(res, 500, {
+      success: false,
+      error: err.message
+    });
+  }
+}
+
+/*
+  POST /call/decline
+
+  Decline an incoming call.
+*/
+async function declineCall(req, res) {
+  try {
+    const data = await body(req);
+    const call = activeCalls.get(String(data.call_id || ""));
+
+    if (!call) {
+      return json(res, 404, {
+        success: false,
+        error: "Call not found"
+      });
+    }
+
+    if (String(data.subscriber_id || "") !== call.receiver_id) {
+      return json(res, 403, {
+        success: false,
+        error: "Not authorized"
+      });
+    }
+
+    call.status = "declined";
+    call.ended_at = new Date().toISOString();
+
+    return json(res, 200, {
+      success: true,
+      call: cleanCall(call)
+    });
+  } catch (err) {
+    return json(res, 500, {
+      success: false,
+      error: err.message
+    });
+  }
+}
+
+/*
+  POST /call/end
+
+  End a connected/ringing call.
+*/
+async function endCall(req, res) {
+  try {
+    const data = await body(req);
+    const call = activeCalls.get(String(data.call_id || ""));
+
+    if (!call) {
+      return json(res, 404, {
+        success: false,
+        error: "Call not found"
+      });
+    }
+
+    const subscriber_id = String(data.subscriber_id || "");
+
+    if (
+      subscriber_id !== call.caller_id &&
+      subscriber_id !== call.receiver_id
+    ) {
+      return json(res, 403, {
+        success: false,
+        error: "Not authorized"
+      });
+    }
+
+    call.status = "ended";
+    call.ended_at = new Date().toISOString();
+
+    return json(res, 200, {
+      success: true,
+      call: cleanCall(call)
+    });
+  } catch (err) {
+    return json(res, 500, {
+      success: false,
+      error: err.message
+    });
+  }
+}
+
+
+const handler = async (req, res) => {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+    });
+    return res.end();
+  }
+
+  try {
+    // Health
+    
+  
+if (req.method === "POST" && req.url === "/call/signal") {
+  return sendCallSignal(req, res);
+}
+
+if (
+  req.method === "GET" &&
+  req.url.startsWith("/call/signals/")
+) {
+  const parts = req.url.split("/call/signals/")[1].split("?");
+  const callIdValue = decodeURIComponent(parts[0]);
+
+  const query = new URL(
+    req.url,
+    "http://localhost"
+  ).searchParams;
+
+  const subscriberId = query.get("subscriber_id");
+
+  return getCallSignals(
+    req,
+    res,
+    callIdValue,
+    subscriberId
+  );
+}
+
+if (req.method === "POST" && req.url === "/call/start") {
+    return startCall(req, res);
+  }
+
+  if (
+    req.method === "GET" &&
+    req.url.startsWith("/call/incoming/")
+  ) {
+    const subscriber_id =
+      decodeURIComponent(
+        req.url.split("/call/incoming/")[1].split("?")[0]
+      );
+
+    return incomingCall(req, res, subscriber_id);
+  }
+
+  if (req.method === "POST" && req.url === "/call/answer") {
+    return answerCall(req, res);
+  }
+
+  if (req.method === "POST" && req.url === "/call/decline") {
+    return declineCall(req, res);
+  }
+
+  if (req.method === "POST" && req.url === "/call/end") {
+    return endCall(req, res);
+  }
+
+if (req.method === "GET" && req.url === "/health") {
+      return json(res, 200, {
+        success: true,
+        network: "Vicky Network",
+        service: "subscriber-backend",
+        status: "running"
+      });
+    }
+
+    // Register
+    if (req.method === "POST" && req.url === "/subscriber/register") {
+      const data = await body(req);
+
+      if (!data.name || !data.email || !data.password) {
+        return json(res, 400, {
+          success: false,
+          error: "Name, email and password are required"
+        });
+      }
+
+      const subscribers = readSubscribers();
+
+      if (subscribers.some(s => s.email.toLowerCase() === data.email.toLowerCase())) {
+        return json(res, 409, {
+          success: false,
+          error: "Email already registered"
+        });
+      }
+
+      const subscriber = {
+        id: crypto.randomUUID(),
+        name: data.name,
+        email: data.email.toLowerCase(),
+        password: data.password,
+        vicky_number: makeVickyNumber(subscribers),
+        status: "active",
+        data_balance_gb: 0,
+        call_balance_minutes: 0,
+        active_data_subscription: null,
+        active_call_subscription: null,
+        created_at: new Date().toISOString()
+      };
+
+      subscribers.push(subscriber);
+      saveSubscribers(subscribers);
+
+      return json(res, 201, {
+        success: true,
+        message: "Vicky Network subscriber created",
+        subscriber: publicSubscriber(subscriber)
+      });
+    }
+
+    // Login
+    if (req.method === "POST" && req.url === "/subscriber/login") {
+      const data = await body(req);
+      const subscribers = readSubscribers();
+
+      const subscriber = subscribers.find(
+        s =>
+          s.email === String(data.email || "").toLowerCase() &&
+          s.password === data.password
+      );
+
+      if (!subscriber) {
+        return json(res, 401, {
+          success: false,
+          error: "Invalid email or password"
+        });
+      }
+
+      return json(res, 200, {
+        success: true,
+        subscriber: publicSubscriber(subscriber)
+      });
+    }
+
+    // Get subscriber
+    if (req.method === "GET" && req.url.startsWith("/subscriber/")) {
+      const id = req.url.split("/")[2];
+      const subscribers = readSubscribers();
+      const subscriber = subscribers.find(s => s.id === id);
+
+      if (!subscriber) {
+        return json(res, 404, {
+          success: false,
+          error: "Subscriber not found"
+        });
+      }
+
+      return json(res, 200, {
+        success: true,
+        subscriber: publicSubscriber(subscriber)
+      });
+    }
+
+    // Development subscription endpoint
+    if (req.method === "POST" && req.url === "/subscriber/test-subscription") {
+      const data = await body(req);
+      const subscribers = readSubscribers();
+
+      const subscriber = subscribers.find(s => s.id === data.subscriber_id);
+
+      if (!subscriber) {
+        return json(res, 404, {
+          success: false,
+          error: "Subscriber not found"
+        });
+      }
+
+      if (data.type === "data") {
+        subscriber.data_balance_gb += Number(data.amount || 0);
+        subscriber.active_data_subscription = {
+          name: data.plan || "Data Bundle",
+          amount: Number(data.amount || 0),
+          activated_at: new Date().toISOString()
+        };
+      }
+
+      if (data.type === "calls") {
+        subscriber.call_balance_minutes += Number(data.amount || 0);
+        subscriber.active_call_subscription = {
+          name: data.plan || "Call Bundle",
+          amount: Number(data.amount || 0),
+          activated_at: new Date().toISOString()
+        };
+      }
+
+      saveSubscribers(subscribers);
+
+      return json(res, 200, {
+        success: true,
+        message: "Subscription activated",
+        subscriber: publicSubscriber(subscriber)
+      });
+    }
+
+    return json(res, 404, {
+      success: false,
+      error: "Route not found"
+    });
+
+  } catch (error) {
+    return json(res, 500, {
+      success: false,
+      error: error.message
+    });
+  }
+};
+
+
+
+
+module.exports = handler;
