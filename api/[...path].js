@@ -643,7 +643,11 @@ if (
   );
 }
 
-if (req.method === "POST" && req.url === "/call/start") {
+if (req.method === "GET" && req.url === "/debug/active-calls") {
+    return debugActiveCalls(req, res);
+  }
+
+  if (req.method === "POST" && req.url === "/call/start") {
     return startCall(req, res);
   }
 
