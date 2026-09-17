@@ -1,22 +1,5 @@
-const http = require("http");
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
-
-const PORT = process.env.PORT || 8789;
-const DATA_DIR = path.join(__dirname, "data");
-const DB_FILE = path.join(DATA_DIR, "subscribers.json");
-
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, "[]");
-
-function readSubscribers() {
-  return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-}
-
-function saveSubscribers(data) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-}
+const db = require("../db");
 
 function json(res, status, data) {
   res.writeHead(status, {
@@ -60,8 +43,8 @@ function publicSubscriber(s) {
     email: s.email,
     vicky_number: s.vicky_number,
     status: s.status,
-    data_balance_gb: s.data_balance_gb,
-    call_balance_minutes: s.call_balance_minutes,
+    data_balance_gb: Number(s.data_balance ?? s.data_balance_gb ?? 0),
+    call_balance_minutes: Number(s.call_balance ?? s.call_balance_minutes ?? 0),
     active_data_subscription: s.active_data_subscription,
     active_call_subscription: s.active_call_subscription,
     created_at: s.created_at
@@ -179,6 +162,35 @@ function cleanCall(call) {
 
   Creates a Vicky-to-Vicky call request.
 */
+async function cleanupStaleCalls() {
+  try {
+    const rows = await db.sql`
+      SELECT *
+      FROM call_logs
+      WHERE status = 'ringing'
+        AND created_at < NOW() - INTERVAL '2 minutes'
+  `;
+
+  for (const call of rows) {
+    await db.updateCallLog(call.id, {
+      status: "missed",
+      answered_at: call.answered_at,
+      ended_at: new Date().toISOString(),
+      duration_seconds: 0
+    });
+
+    activeCalls.delete(call.id);
+  }
+  } catch (err) {
+    console.log("Call cleanup error:", err.message);
+  }
+}
+
+/*
+  POST /call/start
+
+  Creates a persistent Vicky-to-Vicky call request.
+*/
 async function startCall(req, res) {
   try {
     const data = await body(req);
@@ -193,15 +205,8 @@ async function startCall(req, res) {
       });
     }
 
-    const subscribers = readSubscribers();
-
-    const caller = subscribers.find(
-      s => s.id === caller_id
-    );
-
-    const receiver = subscribers.find(
-      s => String(s.vicky_number) === receiver_number
-    );
+    const caller = await db.getSubscriberById(caller_id);
+    const receiver = await db.getSubscriberByNumber(receiver_number);
 
     if (!caller) {
       return json(res, 404, {
@@ -224,16 +229,12 @@ async function startCall(req, res) {
       });
     }
 
-    const existing = [...activeCalls.values()].find(
-      c =>
-        (c.caller_id === caller.id ||
-          c.receiver_id === caller.id ||
-          c.caller_id === receiver.id ||
-          c.receiver_id === receiver.id) &&
-        ["ringing", "connected"].includes(c.status)
-    );
+    await cleanupStaleCalls();
 
-    if (existing) {
+    const callerBusy = await db.getActiveCallForSubscriber(caller.id);
+    const receiverBusy = await db.getActiveCallForSubscriber(receiver.id);
+
+    if (callerBusy || receiverBusy) {
       return json(res, 409, {
         success: false,
         error: "One of the users is already on a call"
@@ -250,6 +251,8 @@ async function startCall(req, res) {
       signals: [],
       created_at: new Date().toISOString()
     };
+
+    await db.createCallLog(call);
 
     activeCalls.set(call.id, call);
 
@@ -268,30 +271,47 @@ async function startCall(req, res) {
 /*
   GET /call/incoming/:subscriber_id
 
-  Returns the current ringing call for a subscriber.
+  Returns the current persistent ringing call.
 */
-function incomingCall(req, res, subscriber_id) {
-  const call = [...activeCalls.values()].find(
-    c =>
-      c.receiver_id === subscriber_id &&
-      c.status === "ringing"
-  );
+async function incomingCall(req, res, subscriber_id) {
+  try {
+    await cleanupStaleCalls();
 
-  return json(res, 200, {
-    success: true,
-    call: call ? cleanCall(call) : null
-  });
+    const call = await db.sql`
+      SELECT *
+      FROM call_logs
+      WHERE receiver_id = ${subscriber_id}
+        AND status = 'ringing'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+
+    const row = call[0] || null;
+
+    return json(res, 200, {
+      success: true,
+      call: row ? cleanCall(row) : null
+    });
+  } catch (err) {
+    return json(res, 500, {
+      success: false,
+      error: err.message
+    });
+  }
 }
 
 /*
   POST /call/answer
 
-  Accept an incoming call.
+  Accept an incoming persistent call.
 */
 async function answerCall(req, res) {
   try {
     const data = await body(req);
-    const call = activeCalls.get(String(data.call_id || ""));
+    const callIdValue = String(data.call_id || "");
+    const subscriber_id = String(data.subscriber_id || "");
+
+    const call = await db.getActiveCall(callIdValue);
 
     if (!call) {
       return json(res, 404, {
@@ -307,19 +327,31 @@ async function answerCall(req, res) {
       });
     }
 
-    if (String(data.subscriber_id || "") !== call.receiver_id) {
+    if (subscriber_id !== call.receiver_id) {
       return json(res, 403, {
         success: false,
         error: "Not authorized to answer this call"
       });
     }
 
-    call.status = "connected";
-    call.answered_at = new Date().toISOString();
+    const answered_at = new Date().toISOString();
+
+    const updated = await db.updateCallLog(call.id, {
+      status: "connected",
+      answered_at,
+      ended_at: null,
+      duration_seconds: 0
+    });
+
+    activeCalls.set(call.id, {
+      ...call,
+      status: "connected",
+      answered_at
+    });
 
     return json(res, 200, {
       success: true,
-      call: cleanCall(call)
+      call: cleanCall(updated)
     });
   } catch (err) {
     return json(res, 500, {
@@ -332,12 +364,15 @@ async function answerCall(req, res) {
 /*
   POST /call/decline
 
-  Decline an incoming call.
+  Decline an incoming persistent call.
 */
 async function declineCall(req, res) {
   try {
     const data = await body(req);
-    const call = activeCalls.get(String(data.call_id || ""));
+    const callIdValue = String(data.call_id || "");
+    const subscriber_id = String(data.subscriber_id || "");
+
+    const call = await db.getActiveCall(callIdValue);
 
     if (!call) {
       return json(res, 404, {
@@ -346,19 +381,27 @@ async function declineCall(req, res) {
       });
     }
 
-    if (String(data.subscriber_id || "") !== call.receiver_id) {
+    if (subscriber_id !== call.receiver_id) {
       return json(res, 403, {
         success: false,
         error: "Not authorized"
       });
     }
 
-    call.status = "declined";
-    call.ended_at = new Date().toISOString();
+    const ended_at = new Date().toISOString();
+
+    const updated = await db.updateCallLog(call.id, {
+      status: "declined",
+      answered_at: call.answered_at,
+      ended_at,
+      duration_seconds: 0
+    });
+
+    activeCalls.delete(call.id);
 
     return json(res, 200, {
       success: true,
-      call: cleanCall(call)
+      call: cleanCall(updated)
     });
   } catch (err) {
     return json(res, 500, {
@@ -371,12 +414,15 @@ async function declineCall(req, res) {
 /*
   POST /call/end
 
-  End a connected/ringing call.
+  End a connected/ringing persistent call.
 */
 async function endCall(req, res) {
   try {
     const data = await body(req);
-    const call = activeCalls.get(String(data.call_id || ""));
+    const callIdValue = String(data.call_id || "");
+    const subscriber_id = String(data.subscriber_id || "");
+
+    const call = await db.getActiveCall(callIdValue);
 
     if (!call) {
       return json(res, 404, {
@@ -384,8 +430,6 @@ async function endCall(req, res) {
         error: "Call not found"
       });
     }
-
-    const subscriber_id = String(data.subscriber_id || "");
 
     if (
       subscriber_id !== call.caller_id &&
@@ -397,12 +441,31 @@ async function endCall(req, res) {
       });
     }
 
-    call.status = "ended";
-    call.ended_at = new Date().toISOString();
+    const ended_at = new Date().toISOString();
+
+    const start = call.answered_at
+      ? new Date(call.answered_at).getTime()
+      : new Date(call.created_at).getTime();
+
+    const duration = Math.max(
+      0,
+      Math.floor(
+        (new Date(ended_at).getTime() - start) / 1000
+      )
+    );
+
+    const updated = await db.updateCallLog(call.id, {
+      status: "ended",
+      answered_at: call.answered_at,
+      ended_at,
+      duration_seconds: duration
+    });
+
+    activeCalls.delete(call.id);
 
     return json(res, 200, {
       success: true,
-      call: cleanCall(call)
+      call: cleanCall(updated)
     });
   } catch (err) {
     return json(res, 500, {
@@ -412,8 +475,8 @@ async function endCall(req, res) {
   }
 }
 
-
 const handler = async (req, res) => {
+  await db.initDatabase();
   // Normalize Vercel function paths to the original API routes.
   const originalUrl = req.url || "/";
   if (originalUrl.startsWith("/api/")) {
@@ -519,49 +582,56 @@ if (req.method === "GET" && req.url === "/health") {
         });
       }
 
-      const subscribers = readSubscribers();
+      const email = String(data.email).toLowerCase();
+      const existing = await db.getSubscriberByEmail(email);
 
-      if (subscribers.some(s => s.email.toLowerCase() === data.email.toLowerCase())) {
+      if (existing) {
         return json(res, 409, {
           success: false,
           error: "Email already registered"
         });
       }
 
+      const subscribers = await db.getSubscribers();
+      const vicky_number = makeVickyNumber(subscribers);
+
       const subscriber = {
         id: crypto.randomUUID(),
-        name: data.name,
-        email: data.email.toLowerCase(),
-        password: data.password,
-        vicky_number: makeVickyNumber(subscribers),
+        name: String(data.name),
+        email,
+        password: String(data.password),
+        vicky_number,
         status: "active",
-        data_balance_gb: 0,
-        call_balance_minutes: 0,
+        data_balance: 0,
+        call_balance: 0,
         active_data_subscription: null,
         active_call_subscription: null,
         created_at: new Date().toISOString()
       };
 
-      subscribers.push(subscriber);
-      saveSubscribers(subscribers);
+      const created = await db.createSubscriber(subscriber);
 
       return json(res, 201, {
         success: true,
         message: "Vicky Network subscriber created",
-        subscriber: publicSubscriber(subscriber)
+        subscriber: publicSubscriber(created)
       });
     }
 
     // Login
     if (req.method === "POST" && req.url === "/subscriber/login") {
       const data = await body(req);
-      const subscribers = readSubscribers();
 
-      const subscriber = subscribers.find(
-        s =>
-          s.email === String(data.email || "").toLowerCase() &&
-          s.password === data.password
+      const subscriber = await db.getSubscriberByEmail(
+        String(data.email || "").toLowerCase()
       );
+
+      if (subscriber && subscriber.password !== String(data.password || "")) {
+        return json(res, 401, {
+          success: false,
+          error: "Invalid email or password"
+        });
+      }
 
       if (!subscriber) {
         return json(res, 401, {
@@ -579,8 +649,7 @@ if (req.method === "GET" && req.url === "/health") {
     // Get subscriber
     if (req.method === "GET" && req.url.startsWith("/subscriber/")) {
       const id = req.url.split("/")[2];
-      const subscribers = readSubscribers();
-      const subscriber = subscribers.find(s => s.id === id);
+      const subscriber = await db.getSubscriberById(id);
 
       if (!subscriber) {
         return json(res, 404, {
@@ -598,9 +667,7 @@ if (req.method === "GET" && req.url === "/health") {
     // Development subscription endpoint
     if (req.method === "POST" && req.url === "/subscriber/test-subscription") {
       const data = await body(req);
-      const subscribers = readSubscribers();
-
-      const subscriber = subscribers.find(s => s.id === data.subscriber_id);
+      const subscriber = await db.getSubscriberById(data.subscriber_id);
 
       if (!subscriber) {
         return json(res, 404, {
@@ -609,30 +676,38 @@ if (req.method === "GET" && req.url === "/health") {
         });
       }
 
+      const amount = Number(data.amount || 0);
+      const now = new Date().toISOString();
+
+      const updates = {};
+
       if (data.type === "data") {
-        subscriber.data_balance_gb += Number(data.amount || 0);
-        subscriber.active_data_subscription = {
+        updates.data_balance = Number(subscriber.data_balance || 0) + amount;
+        updates.active_data_subscription = {
           name: data.plan || "Data Bundle",
-          amount: Number(data.amount || 0),
-          activated_at: new Date().toISOString()
+          amount,
+          activated_at: now
         };
       }
 
       if (data.type === "calls") {
-        subscriber.call_balance_minutes += Number(data.amount || 0);
-        subscriber.active_call_subscription = {
+        updates.call_balance = Number(subscriber.call_balance || 0) + amount;
+        updates.active_call_subscription = {
           name: data.plan || "Call Bundle",
-          amount: Number(data.amount || 0),
-          activated_at: new Date().toISOString()
+          amount,
+          activated_at: now
         };
       }
 
-      saveSubscribers(subscribers);
+      const updated = await db.updateSubscriber(
+        subscriber.id,
+        updates
+      );
 
       return json(res, 200, {
         success: true,
         message: "Subscription activated",
-        subscriber: publicSubscriber(subscriber)
+        subscriber: publicSubscriber(updated)
       });
     }
 
