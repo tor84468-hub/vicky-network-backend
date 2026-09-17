@@ -568,6 +568,37 @@ const handler = async (req, res) => {
   }
 
   // Direct Vercel health endpoint
+
+  if (
+    req.method === "GET" &&
+    req.url.startsWith("/call/history/")
+  ) {
+    try {
+      const subscriber_id = decodeURIComponent(
+        req.url.split("/call/history/")[1].split("?")[0]
+      );
+
+      if (!subscriber_id) {
+        return json(res, 400, {
+          success: false,
+          error: "Subscriber ID is required"
+        });
+      }
+
+      const history = await db.getCallHistory(subscriber_id);
+
+      return json(res, 200, {
+        success: true,
+        calls: history.map(cleanCall)
+      });
+    } catch (err) {
+      return json(res, 500, {
+        success: false,
+        error: err.message
+      });
+    }
+  }
+
   if (req.method === "GET" && req.url.endsWith("/health")) {
     return json(res, 200, {
       success: true,
