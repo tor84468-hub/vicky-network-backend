@@ -409,7 +409,8 @@ async function answerCall(req, res) {
       return json(res, 404, {
         success: false,
         error: "Call not found",
-        debug_call_id: callIdValue
+        debug_call_id: callIdValue,
+        debug_subscriber_id: subscriber_id
       });
     }
 
