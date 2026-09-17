@@ -643,7 +643,10 @@ if (
   );
 }
 
-if (req.method === "GET" && req.url === "/debug/active-calls") {
+if (
+    req.method === "GET" &&
+    req.url.startsWith("/debug/active-calls")
+  ) {
     return debugActiveCalls(req, res);
   }
 
