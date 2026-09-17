@@ -1,0 +1,49 @@
+[
+  {
+    "id": "6b882d7c-51e4-4cb6-a4d5-a98e0c7e8954",
+    "name": "Vicky User",
+    "email": "user@example.com",
+    "password": "123456",
+    "vicky_number": "11607916",
+    "status": "active",
+    "data_balance_gb": 5,
+    "call_balance_minutes": 500,
+    "active_data_subscription": {
+      "name": "5 GB Data",
+      "amount": 5,
+      "activated_at": "2026-09-17T12:02:59.970Z"
+    },
+    "active_call_subscription": {
+      "name": "500 Minutes",
+      "amount": 500,
+      "activated_at": "2026-09-17T12:02:43.167Z"
+    },
+    "created_at": "2026-09-17T12:00:58.746Z"
+  },
+  {
+    "id": "8d046ce5-b900-40af-a627-b3f99020a0c4",
+    "name": "Victor ",
+    "email": "tor84468@gmail.com",
+    "password": "victor2155",
+    "vicky_number": "14644854",
+    "status": "active",
+    "data_balance_gb": 0,
+    "call_balance_minutes": 0,
+    "active_data_subscription": null,
+    "active_call_subscription": null,
+    "created_at": "2026-09-17T12:16:44.756Z"
+  },
+  {
+    "id": "8ce9023d-9fa8-45f3-b7df-f49d96691d53",
+    "name": "Vicky ",
+    "email": "viceze731@gmail.com",
+    "password": "victor2155",
+    "vicky_number": "49239378",
+    "status": "active",
+    "data_balance_gb": 0,
+    "call_balance_minutes": 0,
+    "active_data_subscription": null,
+    "active_call_subscription": null,
+    "created_at": "2026-09-17T12:25:13.137Z"
+  }
+]

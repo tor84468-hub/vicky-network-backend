@@ -1,0 +1,235 @@
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const PORT = process.env.PORT || 8789;
+const DATA_DIR = path.join(__dirname, "data");
+const DB_FILE = path.join(DATA_DIR, "subscribers.json");
+
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, "[]");
+
+function readSubscribers() {
+  return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+}
+
+function saveSubscribers(data) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+}
+
+function json(res, status, data) {
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+  });
+  res.end(JSON.stringify(data));
+}
+
+function body(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", chunk => data += chunk);
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        reject(new Error("Invalid JSON"));
+      }
+    });
+  });
+}
+
+function makeVickyNumber(subscribers) {
+  let number;
+
+  do {
+    const part = Math.floor(10000000 + Math.random() * 90000000);
+    number = String(part);
+  } while (subscribers.some(s => s.vicky_number === number));
+
+  return number;
+}
+
+function publicSubscriber(s) {
+  return {
+    id: s.id,
+    name: s.name,
+    email: s.email,
+    vicky_number: s.vicky_number,
+    status: s.status,
+    data_balance_gb: s.data_balance_gb,
+    call_balance_minutes: s.call_balance_minutes,
+    active_data_subscription: s.active_data_subscription,
+    active_call_subscription: s.active_call_subscription,
+    created_at: s.created_at
+  };
+}
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+    });
+    return res.end();
+  }
+
+  try {
+    // Health
+    if (req.method === "GET" && req.url === "/health") {
+      return json(res, 200, {
+        success: true,
+        network: "Vicky Network",
+        service: "subscriber-backend",
+        status: "running"
+      });
+    }
+
+    // Register
+    if (req.method === "POST" && req.url === "/subscriber/register") {
+      const data = await body(req);
+
+      if (!data.name || !data.email || !data.password) {
+        return json(res, 400, {
+          success: false,
+          error: "Name, email and password are required"
+        });
+      }
+
+      const subscribers = readSubscribers();
+
+      if (subscribers.some(s => s.email.toLowerCase() === data.email.toLowerCase())) {
+        return json(res, 409, {
+          success: false,
+          error: "Email already registered"
+        });
+      }
+
+      const subscriber = {
+        id: crypto.randomUUID(),
+        name: data.name,
+        email: data.email.toLowerCase(),
+        password: data.password,
+        vicky_number: makeVickyNumber(subscribers),
+        status: "active",
+        data_balance_gb: 0,
+        call_balance_minutes: 0,
+        active_data_subscription: null,
+        active_call_subscription: null,
+        created_at: new Date().toISOString()
+      };
+
+      subscribers.push(subscriber);
+      saveSubscribers(subscribers);
+
+      return json(res, 201, {
+        success: true,
+        message: "Vicky Network subscriber created",
+        subscriber: publicSubscriber(subscriber)
+      });
+    }
+
+    // Login
+    if (req.method === "POST" && req.url === "/subscriber/login") {
+      const data = await body(req);
+      const subscribers = readSubscribers();
+
+      const subscriber = subscribers.find(
+        s =>
+          s.email === String(data.email || "").toLowerCase() &&
+          s.password === data.password
+      );
+
+      if (!subscriber) {
+        return json(res, 401, {
+          success: false,
+          error: "Invalid email or password"
+        });
+      }
+
+      return json(res, 200, {
+        success: true,
+        subscriber: publicSubscriber(subscriber)
+      });
+    }
+
+    // Get subscriber
+    if (req.method === "GET" && req.url.startsWith("/subscriber/")) {
+      const id = req.url.split("/")[2];
+      const subscribers = readSubscribers();
+      const subscriber = subscribers.find(s => s.id === id);
+
+      if (!subscriber) {
+        return json(res, 404, {
+          success: false,
+          error: "Subscriber not found"
+        });
+      }
+
+      return json(res, 200, {
+        success: true,
+        subscriber: publicSubscriber(subscriber)
+      });
+    }
+
+    // Development subscription endpoint
+    if (req.method === "POST" && req.url === "/subscriber/test-subscription") {
+      const data = await body(req);
+      const subscribers = readSubscribers();
+
+      const subscriber = subscribers.find(s => s.id === data.subscriber_id);
+
+      if (!subscriber) {
+        return json(res, 404, {
+          success: false,
+          error: "Subscriber not found"
+        });
+      }
+
+      if (data.type === "data") {
+        subscriber.data_balance_gb += Number(data.amount || 0);
+        subscriber.active_data_subscription = {
+          name: data.plan || "Data Bundle",
+          amount: Number(data.amount || 0),
+          activated_at: new Date().toISOString()
+        };
+      }
+
+      if (data.type === "calls") {
+        subscriber.call_balance_minutes += Number(data.amount || 0);
+        subscriber.active_call_subscription = {
+          name: data.plan || "Call Bundle",
+          amount: Number(data.amount || 0),
+          activated_at: new Date().toISOString()
+        };
+      }
+
+      saveSubscribers(subscribers);
+
+      return json(res, 200, {
+        success: true,
+        message: "Subscription activated",
+        subscriber: publicSubscriber(subscriber)
+      });
+    }
+
+    return json(res, 404, {
+      success: false,
+      error: "Route not found"
+    });
+
+  } catch (error) {
+    return json(res, 500, {
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Vicky Network subscriber backend running on port ${PORT}`);
+});
