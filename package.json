@@ -4,5 +4,6 @@
   "private": true,
   "scripts": {
     "start": "node api/index.js"
-  }
+  },
+  "main": "index.js"
 }
