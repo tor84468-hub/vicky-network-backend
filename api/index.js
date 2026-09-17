@@ -414,13 +414,6 @@ async function endCall(req, res) {
 
 
 const handler = async (req, res) => {
-  // Vercel sends the /api prefix; the existing router expects paths without it.
-  if (req.url.startsWith("/api/")) {
-    req.url = req.url.slice(4);
-  } else if (req.url === "/api") {
-    req.url = "/";
-  }
-
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
