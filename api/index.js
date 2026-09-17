@@ -414,6 +414,14 @@ async function endCall(req, res) {
 
 
 const handler = async (req, res) => {
+  // Normalize Vercel function paths to the original API routes.
+  const originalUrl = req.url || "/";
+  if (originalUrl.startsWith("/api/")) {
+    req.url = originalUrl.slice(4);
+  } else {
+    req.url = originalUrl;
+  }
+
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
