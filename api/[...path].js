@@ -652,6 +652,59 @@ if (req.method === "POST" && req.url === "/call/start") {
 
   if (
     req.method === "GET" &&
+    req.url.startsWith("/call/status/")
+  ) {
+    try {
+      const parts = req.url.split("/call/status/")[1].split("?");
+      const call_id = decodeURIComponent(parts[0]);
+
+      const query = new URL(
+        req.url,
+        "http://localhost"
+      ).searchParams;
+
+      const subscriber_id = query.get("subscriber_id");
+
+      if (!call_id || !subscriber_id) {
+        return json(res, 400, {
+          success: false,
+          error: "Call ID and subscriber ID are required"
+        });
+      }
+
+      const call = await db.getCallLog(call_id);
+
+      if (!call) {
+        return json(res, 404, {
+          success: false,
+          error: "Call not found"
+        });
+      }
+
+      if (
+        call.caller_id !== subscriber_id &&
+        call.receiver_id !== subscriber_id
+      ) {
+        return json(res, 403, {
+          success: false,
+          error: "Not authorized to view this call"
+        });
+      }
+
+      return json(res, 200, {
+        success: true,
+        call: cleanCall(call)
+      });
+    } catch (err) {
+      return json(res, 500, {
+        success: false,
+        error: err.message
+      });
+    }
+  }
+
+  if (
+    req.method === "GET" &&
     req.url.startsWith("/call/incoming/")
   ) {
     const subscriber_id =
