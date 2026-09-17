@@ -248,7 +248,7 @@ async function cleanupStaleCalls() {
       SELECT *
       FROM call_logs
       WHERE status = 'ringing'
-        AND created_at < NOW() - INTERVAL '2 minutes'
+        AND created_at < NOW() - INTERVAL '5 minutes'
   `;
 
   for (const call of rows) {
