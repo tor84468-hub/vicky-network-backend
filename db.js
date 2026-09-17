@@ -98,6 +98,10 @@ async function getActiveCallForSubscriber(subscriberId) {
       OR receiver_id = ${subscriberId}
     )
     AND status IN ('ringing', 'connected')
+    AND (
+      status = 'connected'
+      OR created_at > NOW() - INTERVAL '5 minutes'
+    )
     ORDER BY created_at DESC
     LIMIT 1
   `;
